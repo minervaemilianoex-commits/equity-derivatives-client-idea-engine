@@ -84,6 +84,11 @@ class StrategyIdea:
     market_view: str
     tags: List[str] = field(default_factory=list)
     legs: List[StrategyLeg] = field(default_factory=list)
+    is_defined_risk: bool = True
+    has_short_put_exposure: bool = False
+    short_put_exposure_style: str = "none"
+    upfront_style: str = "debit"
+    explainability_level: int = 8
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def add_leg(self, leg: StrategyLeg) -> None:
@@ -212,6 +217,11 @@ def build_call_spread(
         ),
         market_view="moderately_bullish",
         tags=["bullish", "defined-risk", "moderate-upside", "client-friendly"],
+        is_defined_risk=True,
+        has_short_put_exposure=False,
+        short_put_exposure_style="none",
+        upfront_style="debit",
+        explainability_level=9,
         metadata={
             "tenor_days": tenor,
             "lower_strike": lower_strike,
@@ -285,6 +295,11 @@ def build_put_spread_collar(
         ),
         market_view="protective_bullish",
         tags=["hedging", "income-financed", "defined-risk-band", "client-friendly"],
+        is_defined_risk=True,
+        has_short_put_exposure=True,
+        short_put_exposure_style="hedge_overlay",
+        upfront_style="low_cost_overlay",
+        explainability_level=8,
         metadata={
             "tenor_days": tenor,
             "long_put_strike": long_put_strike,
@@ -374,6 +389,11 @@ def build_short_put_spread(
         ),
         market_view="neutral_to_mildly_bullish",
         tags=["short-vol", "defined-risk", "income", "downside-skew"],
+        is_defined_risk=True,
+        has_short_put_exposure=True,
+        short_put_exposure_style="directional_short_put",
+        upfront_style="credit",
+        explainability_level=7,
         metadata={
             "tenor_days": tenor,
             "short_put_strike": short_put_strike,
@@ -442,6 +462,11 @@ def build_risk_reversal(
         ),
         market_view="bullish_skew_trade",
         tags=["bullish", "skew-trade", "client-selective", "less-plain-vanilla"],
+        is_defined_risk=False,
+        has_short_put_exposure=True,
+        short_put_exposure_style="directional_short_put",
+        upfront_style="zero_or_low_cost",
+        explainability_level=6,
         metadata={
             "tenor_days": tenor,
             "put_strike": put_strike,

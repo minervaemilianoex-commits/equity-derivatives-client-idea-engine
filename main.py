@@ -2,17 +2,29 @@ import pandas as pd
 
 from src.engine.analytics import build_market_snapshot, snapshot_to_dataframe
 from src.engine.data_loader import load_all_data
-from src.engine.idea_engine import rank_trade_ideas, ranked_ideas_to_dataframe
+from src.engine.idea_engine import (
+    rank_trade_ideas,
+    ranked_ideas_to_dataframe,
+    explain_profile_filtering,
+)
 from src.engine.reporting import export_run_bundle
 
 
-# Cambia questo valore per cambiare il tipo di cliente / obiettivo:
+# Cambia questi valori per cambiare il tipo di cliente / profilo
+# Client objective options:
 # - "directional_upside"
 # - "hedge_existing_long"
 # - "yield_enhancement"
 # - "sophisticated_skew_trade"
 # - None
 CLIENT_OBJECTIVE = "hedge_existing_long"
+
+# Client profile options:
+# - "conservative"
+# - "balanced"
+# - "yield_seeking"
+# - "aggressive"
+CLIENT_PROFILE_ID = "conservative"
 
 
 def format_snapshot(snapshot_df: pd.DataFrame) -> pd.DataFrame:
@@ -54,7 +66,8 @@ def format_ranking_table(ranking_df: pd.DataFrame) -> pd.DataFrame:
         "risk_discipline",
     ]
 
-    return df[display_cols]
+    existing_cols = [col for col in display_cols if col in df.columns]
+    return df[existing_cols]
 
 
 def main() -> None:
@@ -69,14 +82,28 @@ def main() -> None:
     print("=== MARKET SNAPSHOT ===")
     print(format_snapshot(snapshot_to_dataframe(snapshot)).to_string(index=False))
 
-    print("\n=== CLIENT OBJECTIVE ===")
-    print(CLIENT_OBJECTIVE)
+    print("\n=== CLIENT SETTINGS ===")
+    print(f"Client objective: {CLIENT_OBJECTIVE}")
+    print(f"Client profile: {CLIENT_PROFILE_ID}")
+
+    profile_exclusions = explain_profile_filtering(
+        snapshot=snapshot,
+        client_profile_id=CLIENT_PROFILE_ID,
+    )
+
+    if profile_exclusions:
+        print("\nStrategies excluded by client profile:")
+        for strategy_name, reason in profile_exclusions.items():
+            print(f" - {strategy_name}: {reason}")
+    else:
+        print("\nNo strategies excluded by client profile.")
 
     ranked_ideas = rank_trade_ideas(
         snapshot=snapshot,
         quantity=1.0,
         top_n=4,
         client_objective=CLIENT_OBJECTIVE,
+        client_profile_id=CLIENT_PROFILE_ID,
     )
 
     ranking_df = ranked_ideas_to_dataframe(ranked_ideas)
@@ -120,6 +147,13 @@ def main() -> None:
         print("\nWhy now:")
         for point in ranked_idea.why_now_points:
             print(f"  - {point}")
+        
+        print("\nProfile notes:")
+        if ranked_idea.profile_notes:
+            for point in ranked_idea.profile_notes:
+                print(f"  - {point}")
+        else:
+            print("  - None")
 
         print("\nKey risks:")
         for point in ranked_idea.risk_points:

@@ -5,7 +5,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from src.engine.config import RANKING_CONFIG, RankingConfig
+from src.engine.config import (
+    RANKING_CONFIG,
+    RankingConfig,
+    ClientProfileConfig,
+    get_client_profile,
+)
 from src.engine.pricer import (
     build_payoff_grid,
     extract_client_structure_levels,
@@ -24,6 +29,7 @@ class RankedIdea:
     client_objective: str
     why_now_points: List[str] = field(default_factory=list)
     risk_points: List[str] = field(default_factory=list)
+    profile_notes: List[str] = field(default_factory=list)
     client_type: str = ""
     client_angle: str = ""
     valuation_summary: Dict[str, float] = field(default_factory=dict)
@@ -47,6 +53,60 @@ class RankedIdea:
             "key_parameters": summarize_strategy_parameters(self.strategy),
         }
 
+def _resolve_ranking_weights(
+    ranking_config: RankingConfig,
+    client_profile: Optional[ClientProfileConfig],
+) -> Dict[str, float]:
+    """
+    Use profile-specific ranking weights if available,
+    otherwise fall back to default ranking weights.
+    """
+    if client_profile is not None and client_profile.ranking_weights_override is not None:
+        return client_profile.ranking_weights_override
+
+    return ranking_config.weights
+
+def _profile_exclusion_reason(
+    strategy: StrategyIdea,
+    client_profile: Optional[ClientProfileConfig],
+) -> Optional[str]:
+    """
+    Return a human-readable exclusion reason for a strategy/profile combination.
+    If the strategy is allowed, return None.
+    """
+    if client_profile is None:
+        return None
+
+    if (
+        client_profile.allow_short_put_exposure is False
+        and strategy.short_put_exposure_style == "directional_short_put"
+    ):
+        return "Excluded by client profile: directional short put exposure not allowed."
+
+    return None
+
+def _is_strategy_allowed_for_profile(
+    strategy: StrategyIdea,
+    client_profile: Optional[ClientProfileConfig],
+) -> bool:
+    """
+    Hard suitability filter for client profile constraints.
+
+    Current rule:
+    - if short put exposure is not allowed, exclude only strategies whose
+      short put exposure is directional/aggressive in nature.
+    - keep hedge overlays such as put spread collars eligible.
+    """
+    if client_profile is None:
+        return True
+
+    if (
+        client_profile.allow_short_put_exposure is False
+        and strategy.short_put_exposure_style == "directional_short_put"
+    ):
+        return False
+
+    return True
 
 def clamp_score(value: float, lower: float = 0.0, upper: float = 10.0) -> float:
     return max(lower, min(value, upper))
@@ -546,9 +606,10 @@ def _client_angle(strategy_name: str) -> str:
 
 def _weighted_total_score(
     component_scores: Dict[str, float],
+    active_weights: Optional[Dict[str, float]] = None,
     ranking_config: RankingConfig = RANKING_CONFIG,
 ) -> float:
-    weights = ranking_config.weights
+    weights = active_weights if active_weights is not None else ranking_config.weights
 
     total = 0.0
     for key, weight in weights.items():
@@ -561,9 +622,12 @@ def evaluate_strategy(
     strategy: StrategyIdea,
     snapshot: Dict[str, Any],
     client_objective: Optional[str] = None,
+    active_weights: Optional[Dict[str, float]] = None,
+    client_profile: Optional[ClientProfileConfig] = None,
     ranking_config: RankingConfig = RANKING_CONFIG,
 ) -> RankedIdea:
     spot = float(snapshot["spot"])
+    profile_notes = []
 
     market_fit_score, market_fit_reasons = _market_fit_score(strategy.name, snapshot)
 
@@ -587,10 +651,34 @@ def evaluate_strategy(
         ranking_config=ranking_config,
     )
 
+    if (
+        client_profile is not None
+        and strategy.explainability_level < client_profile.min_explainability_score
+    ):
+        gap = client_profile.min_explainability_score - strategy.explainability_level
+        client_explainability_score = clamp_score(client_explainability_score - gap)
+        explainability_reasons = [
+            f"Penalized for client profile: explainability below minimum threshold ({client_profile.min_explainability_score})."
+    ] + explainability_reasons
+        
+    profile_notes.append(
+        f"Explainability penalized by client profile minimum threshold ({client_profile.min_explainability_score})."
+    )
+
     risk_discipline_score, risk_points = _risk_discipline_score(
         strategy_name=strategy.name,
         snapshot=snapshot,
     )
+
+    if (
+        client_profile is not None
+        and client_profile.allow_short_put_exposure is False
+        and strategy.short_put_exposure_style == "directional_short_put"
+    ):
+        risk_discipline_score = clamp_score(risk_discipline_score - 2.0)
+        profile_notes.append(
+            "Risk discipline penalized by client profile: directional short put exposure not allowed."
+        )
 
     component_scores = {
         "market_fit": market_fit_score,
@@ -600,8 +688,9 @@ def evaluate_strategy(
     }
 
     total_score = _weighted_total_score(
-        component_scores=component_scores,
-        ranking_config=ranking_config,
+    component_scores=component_scores,
+    active_weights=active_weights,
+    ranking_config=ranking_config,
     )
 
     why_now_points = []
@@ -626,6 +715,7 @@ def evaluate_strategy(
         client_objective=client_objective or "cross_client_ranking",
         why_now_points=why_now_points,
         risk_points=risk_points,
+        profile_notes=profile_notes,
         client_type=_suggest_client_type(strategy.name),
         client_angle=_client_angle(strategy.name),
         valuation_summary=valuation_summary,
@@ -640,22 +730,39 @@ def rank_trade_ideas(
     tenor_days: Optional[int] = None,
     top_n: Optional[int] = None,
     client_objective: Optional[str] = None,
+    client_profile_id: Optional[str] = None,
     ranking_config: RankingConfig = RANKING_CONFIG,
 ) -> List[RankedIdea]:
+    client_profile = (
+        get_client_profile(client_profile_id)
+        if client_profile_id is not None
+        else None
+    )
+
+    active_weights = _resolve_ranking_weights(ranking_config, client_profile)
+
     strategy_library = build_strategy_library(
         snapshot=snapshot,
         quantity=quantity,
         tenor_days=tenor_days,
     )
 
+    filtered_strategies = {
+        name: strategy
+        for name, strategy in strategy_library.items()
+        if _is_strategy_allowed_for_profile(strategy, client_profile)
+    }
+
     evaluated = [
-        evaluate_strategy(
-            strategy=strategy,
-            snapshot=snapshot,
-            client_objective=client_objective,
-            ranking_config=ranking_config,
-        )
-        for strategy in strategy_library.values()
+    evaluate_strategy(
+        strategy=strategy,
+        snapshot=snapshot,
+        client_objective=client_objective,
+        active_weights=active_weights,
+        client_profile=client_profile,
+        ranking_config=ranking_config,
+    )
+    for strategy in filtered_strategies.values()
     ]
 
     ranked = sorted(evaluated, key=lambda x: x.total_score, reverse=True)
@@ -716,3 +823,34 @@ def detailed_ranked_idea_to_dataframe(ranked_idea: RankedIdea) -> pd.DataFrame:
         rows.append({"metric": key, "value": value})
 
     return pd.DataFrame(rows)
+
+def explain_profile_filtering(
+    snapshot: Dict[str, Any],
+    quantity: float = 1.0,
+    tenor_days: Optional[int] = None,
+    client_profile_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Return a dictionary of excluded strategies and the reason why they were excluded
+    for the selected client profile.
+    """
+    client_profile = (
+        get_client_profile(client_profile_id)
+        if client_profile_id is not None
+        else None
+    )
+
+    strategy_library = build_strategy_library(
+        snapshot=snapshot,
+        quantity=quantity,
+        tenor_days=tenor_days,
+    )
+
+    exclusions = {}
+
+    for name, strategy in strategy_library.items():
+        reason = _profile_exclusion_reason(strategy, client_profile)
+        if reason is not None:
+            exclusions[name] = reason
+
+    return exclusions

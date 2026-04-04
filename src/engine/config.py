@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 # Root del progetto:
@@ -131,3 +131,93 @@ MARKET_CONFIG = MarketConfig()
 PRICING_CONFIG = PricingConfig()
 STRATEGY_CONFIG = StrategyConfig()
 RANKING_CONFIG = RankingConfig()
+
+# =========================
+# Client profile layer
+# =========================
+
+@dataclass(frozen=True)
+class ClientProfileConfig:
+    profile_id: str
+    allow_short_put_exposure: bool
+    prefer_defined_risk: bool
+    prefer_low_upfront_cost: bool
+    min_explainability_score: float
+    max_grid_loss_pct_of_spot: float
+    ranking_weights_override: Optional[Dict[str, float]] = None
+
+
+CLIENT_PROFILES: Dict[str, ClientProfileConfig] = {
+    "conservative": ClientProfileConfig(
+        profile_id="conservative",
+        allow_short_put_exposure=False,
+        prefer_defined_risk=True,
+        prefer_low_upfront_cost=True,
+        min_explainability_score=8.0,
+        max_grid_loss_pct_of_spot=0.08,
+        ranking_weights_override={
+            "market_fit": 0.32,
+            "payoff_efficiency": 0.18,
+            "client_explainability": 0.22,
+            "risk_discipline": 0.28,
+        },
+    ),
+    "balanced": ClientProfileConfig(
+        profile_id="balanced",
+        allow_short_put_exposure=False,
+        prefer_defined_risk=True,
+        prefer_low_upfront_cost=False,
+        min_explainability_score=7.0,
+        max_grid_loss_pct_of_spot=0.15,
+        ranking_weights_override={
+            "market_fit": 0.38,
+            "payoff_efficiency": 0.24,
+            "client_explainability": 0.18,
+            "risk_discipline": 0.20,
+        },
+    ),
+    "yield_seeking": ClientProfileConfig(
+        profile_id="yield_seeking",
+        allow_short_put_exposure=True,
+        prefer_defined_risk=True,
+        prefer_low_upfront_cost=True,
+        min_explainability_score=6.0,
+        max_grid_loss_pct_of_spot=0.18,
+        ranking_weights_override={
+            "market_fit": 0.34,
+            "payoff_efficiency": 0.32,
+            "client_explainability": 0.14,
+            "risk_discipline": 0.20,
+        },
+    ),
+    "aggressive": ClientProfileConfig(
+        profile_id="aggressive",
+        allow_short_put_exposure=True,
+        prefer_defined_risk=False,
+        prefer_low_upfront_cost=False,
+        min_explainability_score=5.5,
+        max_grid_loss_pct_of_spot=0.30,
+        ranking_weights_override={
+            "market_fit": 0.42,
+            "payoff_efficiency": 0.30,
+            "client_explainability": 0.10,
+            "risk_discipline": 0.18,
+        },
+    ),
+}
+
+
+def get_client_profile(profile_id: str) -> ClientProfileConfig:
+    """
+    Restituisce la configurazione di un profilo cliente predefinito.
+    Solleva ValueError se il profilo non esiste.
+    """
+    normalized = profile_id.strip().lower()
+
+    if normalized not in CLIENT_PROFILES:
+        available = ", ".join(CLIENT_PROFILES.keys())
+        raise ValueError(
+            f"Unknown client profile '{profile_id}'. Available profiles: {available}"
+        )
+
+    return CLIENT_PROFILES[normalized]
