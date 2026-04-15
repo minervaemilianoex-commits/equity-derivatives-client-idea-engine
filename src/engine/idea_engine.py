@@ -68,7 +68,9 @@ def _resolve_ranking_weights(
 
 def _profile_exclusion_reason(
     strategy: StrategyIdea,
+    snapshot: Dict[str, Any],
     client_profile: Optional[ClientProfileConfig],
+    client_objective: Optional[str] = None,
 ) -> Optional[str]:
     """
     Return a human-readable exclusion reason for a strategy/profile combination.
@@ -82,20 +84,117 @@ def _profile_exclusion_reason(
         and strategy.short_put_exposure_style == "directional_short_put"
     ):
         return "Excluded by client profile: directional short put exposure not allowed."
+    
+    if (
+        client_objective == "hedge_existing_long"
+        and strategy.short_put_exposure_style == "hedge_overlay"
+    ):
+        return None
+
+    spot = float(snapshot["spot"])
+    if spot > 0:
+        _, payoff_summary, _, _ = _payoff_efficiency_score(
+            strategy=strategy,
+            spot=spot,
+        )
+        grid_max_loss = payoff_summary.get("grid_max_loss")
+
+        if grid_max_loss is not None:
+            loss_pct_of_spot = abs(float(grid_max_loss)) / spot
+
+            if loss_pct_of_spot > client_profile.max_grid_loss_pct_of_spot:
+                return (
+                    "Excluded by client profile: max grid loss exceeds allowed threshold "
+                    f"({100 * client_profile.max_grid_loss_pct_of_spot:.1f}% of spot)."
+                )
 
     return None
 
+def _exceeds_profile_max_loss(
+    strategy: StrategyIdea,
+    snapshot: Dict[str, Any],
+    client_profile: Optional[ClientProfileConfig],
+    client_objective: Optional[str] = None,
+) -> bool:
+    """
+    Return True if the strategy's grid max loss exceeds the client profile
+    max acceptable loss threshold, expressed as a percentage of spot.
+    """
+    if (
+        client_objective == "hedge_existing_long"
+        and strategy.short_put_exposure_style == "hedge_overlay"
+    ):
+        return False
+
+    spot = float(snapshot["spot"])
+    if spot <= 0:
+        return False
+
+    _, payoff_summary, _, _ = _payoff_efficiency_score(
+        strategy=strategy,
+        spot=spot,
+    )
+
+    grid_max_loss = payoff_summary.get("grid_max_loss")
+    if grid_max_loss is None:
+        return False
+
+    loss_pct_of_spot = abs(float(grid_max_loss)) / spot
+
+    return loss_pct_of_spot > client_profile.max_grid_loss_pct_of_spot
+
+def _low_upfront_cost_adjustment(
+    strategy: StrategyIdea,
+    valuation_summary: Dict[str, float],
+    client_structure_levels: Dict[str, Any],
+    spot: float,
+    client_profile: Optional[ClientProfileConfig],
+    client_objective: Optional[str] = None,
+) -> tuple[float, Optional[str]]:
+    """
+    Return a payoff-efficiency adjustment and an optional profile note
+    based on the client's preference for low upfront cost.
+    """
+    if client_profile is None or client_profile.prefer_low_upfront_cost is not True:
+        return 0.0, None
+
+    if spot <= 0:
+        return 0.0, None
+
+    if (
+        client_objective == "hedge_existing_long"
+        and strategy.short_put_exposure_style == "hedge_overlay"
+    ):
+        overlay_net_value = client_structure_levels.get("overlay_net_value_vs_stock")
+        if overlay_net_value is None:
+            return 0.0, None
+
+        upfront_cost_amount = max(float(overlay_net_value), 0.0)
+    else:
+        current_value = valuation_summary.get("current_value")
+        if current_value is None:
+            return 0.0, None
+
+        upfront_cost_amount = max(float(current_value), 0.0)
+
+    upfront_cost_pct_of_spot = upfront_cost_amount / spot
+
+    if upfront_cost_pct_of_spot <= 0.01:
+        return 0.5, "Payoff efficiency rewarded by client profile: low upfront cost."
+
+    if upfront_cost_pct_of_spot >= 0.05:
+        return -0.75, "Payoff efficiency penalized by client profile: upfront cost is high relative to spot."
+
+    return 0.0, None
+
 def _is_strategy_allowed_for_profile(
     strategy: StrategyIdea,
+    snapshot: Dict[str, Any],
     client_profile: Optional[ClientProfileConfig],
+    client_objective: Optional[str] = None,
 ) -> bool:
     """
     Hard suitability filter for client profile constraints.
-
-    Current rule:
-    - if short put exposure is not allowed, exclude only strategies whose
-      short put exposure is directional/aggressive in nature.
-    - keep hedge overlays such as put spread collars eligible.
     """
     if client_profile is None:
         return True
@@ -104,6 +203,9 @@ def _is_strategy_allowed_for_profile(
         client_profile.allow_short_put_exposure is False
         and strategy.short_put_exposure_style == "directional_short_put"
     ):
+        return False
+
+    if _exceeds_profile_max_loss(strategy, snapshot, client_profile, client_objective):
         return False
 
     return True
@@ -645,24 +747,33 @@ def evaluate_strategy(
         strategy=strategy,
         spot=spot,
     )
-
+    
+    client_structure_levels = _build_client_structure_levels(
+        strategy=strategy,
+        valuation_summary=valuation_summary,
+        spot=spot,
+    )
+    
     client_explainability_score, explainability_reasons = _base_explainability_score(
         strategy_name=strategy.name,
         ranking_config=ranking_config,
     )
+    
+    if client_profile is not None:
+        gap = float(client_profile.min_explainability_score) - float(strategy.explainability_level)
 
-    if (
-        client_profile is not None
-        and strategy.explainability_level < client_profile.min_explainability_score
-    ):
-        gap = client_profile.min_explainability_score - strategy.explainability_level
-        client_explainability_score = clamp_score(client_explainability_score - gap)
-        explainability_reasons = [
-            f"Penalized for client profile: explainability below minimum threshold ({client_profile.min_explainability_score})."
-    ] + explainability_reasons
-        
-    profile_notes.append(
-        f"Explainability penalized by client profile minimum threshold ({client_profile.min_explainability_score})."
+        if gap > 0:
+            client_explainability_score = clamp_score(client_explainability_score - gap)
+            explainability_reasons = [
+                f"Penalized for client profile: explainability below minimum threshold ({client_profile.min_explainability_score})."
+            ] + explainability_reasons
+            profile_notes.append(
+                f"Explainability penalized by client profile minimum threshold ({client_profile.min_explainability_score})."
+            )
+
+    risk_discipline_score, risk_points = _risk_discipline_score(
+        strategy_name=strategy.name,
+        snapshot=snapshot,
     )
 
     risk_discipline_score, risk_points = _risk_discipline_score(
@@ -679,6 +790,31 @@ def evaluate_strategy(
         profile_notes.append(
             "Risk discipline penalized by client profile: directional short put exposure not allowed."
         )
+
+    if (
+        client_profile is not None
+        and client_profile.prefer_defined_risk is True
+        and strategy.is_defined_risk is False
+    ):
+        risk_discipline_score = clamp_score(risk_discipline_score - 1.5)
+        profile_notes.append(
+            "Risk discipline penalized by client profile: undefined-risk structure is less suitable."
+        )
+
+    upfront_adjustment, upfront_note = _low_upfront_cost_adjustment(
+        strategy=strategy,
+        valuation_summary=valuation_summary,
+        client_structure_levels=client_structure_levels,
+        spot=spot,
+        client_profile=client_profile,
+        client_objective=client_objective,
+    )
+
+    if upfront_adjustment != 0.0:
+        payoff_efficiency_score = clamp_score(payoff_efficiency_score + upfront_adjustment)
+
+    if upfront_note is not None:
+        profile_notes.append(upfront_note)
 
     component_scores = {
         "market_fit": market_fit_score,
@@ -750,7 +886,12 @@ def rank_trade_ideas(
     filtered_strategies = {
         name: strategy
         for name, strategy in strategy_library.items()
-        if _is_strategy_allowed_for_profile(strategy, client_profile)
+        if _is_strategy_allowed_for_profile(
+            strategy,
+            snapshot,
+            client_profile,
+            client_objective,
+        )
     }
 
     evaluated = [
@@ -829,6 +970,7 @@ def explain_profile_filtering(
     quantity: float = 1.0,
     tenor_days: Optional[int] = None,
     client_profile_id: Optional[str] = None,
+    client_objective: Optional[str] = None,
 ) -> Dict[str, str]:
     """
     Return a dictionary of excluded strategies and the reason why they were excluded
@@ -849,7 +991,12 @@ def explain_profile_filtering(
     exclusions = {}
 
     for name, strategy in strategy_library.items():
-        reason = _profile_exclusion_reason(strategy, client_profile)
+        reason = _profile_exclusion_reason(
+            strategy,
+            snapshot,
+            client_profile,
+            client_objective,
+        )
         if reason is not None:
             exclusions[name] = reason
 

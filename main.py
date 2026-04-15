@@ -26,6 +26,7 @@ CLIENT_OBJECTIVE = "hedge_existing_long"
 # - "aggressive"
 CLIENT_PROFILE_ID = "conservative"
 
+VALUATION_DATE = "2024-07-15"
 
 def format_snapshot(snapshot_df: pd.DataFrame) -> pd.DataFrame:
     df = snapshot_df.copy()
@@ -77,6 +78,7 @@ def main() -> None:
         spot_df=spot_df,
         iv_df=iv_df,
         events_df=events_df,
+        valuation_date=VALUATION_DATE,
     )
 
     print("=== MARKET SNAPSHOT ===")
@@ -85,10 +87,12 @@ def main() -> None:
     print("\n=== CLIENT SETTINGS ===")
     print(f"Client objective: {CLIENT_OBJECTIVE}")
     print(f"Client profile: {CLIENT_PROFILE_ID}")
+    print(f"Valuation date: {VALUATION_DATE}")
 
     profile_exclusions = explain_profile_filtering(
         snapshot=snapshot,
         client_profile_id=CLIENT_PROFILE_ID,
+        client_objective=CLIENT_OBJECTIVE,
     )
 
     if profile_exclusions:
@@ -163,6 +167,7 @@ def main() -> None:
         snapshot=snapshot,
         ranked_ideas=ranked_ideas,
         top_n=3,
+        client_profile_id="conservative",
     )
 
     print("\n=== REPORTING OUTPUT ===")

@@ -221,16 +221,25 @@ def extract_iv_metrics(
     - 105% call proxy IV
     - skew metric
     """
-    latest_date = pd.to_datetime(iv_df["date"]).max()
-    latest_df = iv_df[pd.to_datetime(iv_df["date"]) == latest_date].copy()
-
-    if latest_df.empty:
-        raise ValueError("IV dataframe is empty after filtering latest date.")
-
-    available_tenors = latest_df["tenor_days"].unique()
+    iv_df = iv_df.copy()
+    iv_df["date"] = pd.to_datetime(iv_df["date"])
+    
+    if iv_df.empty:
+        raise ValueError("IV dataframe is empty.")
+    
+    iv_dates = iv_df["date"].dropna().unique()
+    
+    if len(iv_dates) != 1:
+        raise ValueError(
+            "extract_iv_metrics expects IV data for a single valuation date."
+            )
+        
+    iv_date = pd.to_datetime(iv_dates[0])
+    
+    available_tenors = iv_df["tenor_days"].unique()
     selected_tenor = min(available_tenors, key=lambda x: abs(x - target_tenor_days))
-
-    surface = latest_df[latest_df["tenor_days"] == selected_tenor].copy()
+    
+    surface = iv_df[iv_df["tenor_days"] == selected_tenor].copy()
 
     atm_info = _pick_nearest_iv(surface, target_strike=spot)
     put_95_info = _pick_nearest_iv(surface, target_strike=spot * 0.95, option_type="put")
@@ -244,7 +253,7 @@ def extract_iv_metrics(
     downside_skew_vs_atm = put_95_iv - atm_iv
 
     return {
-        "iv_date": latest_date,
+        "iv_date": iv_date,
         "tenor_days": int(selected_tenor),
         "atm_strike": atm_info["strike"],
         "atm_iv": atm_iv,
@@ -294,16 +303,38 @@ def build_market_snapshot(
     spot_df: pd.DataFrame,
     iv_df: pd.DataFrame,
     events_df: pd.DataFrame,
+    valuation_date: Optional[str] = None,
     market_config: MarketConfig = MARKET_CONFIG,
 ) -> Dict[str, Any]:
     """
     Build a single summary dictionary containing the latest market state.
     """
-    enriched_spot = enrich_spot_history(spot_df, market_config=market_config)
+    spot_df = spot_df.copy()
+    spot_df["date"] = pd.to_datetime(spot_df["date"])
+    
+    iv_df = iv_df.copy()
+    iv_df["date"] = pd.to_datetime(iv_df["date"])
+    
+    events_df = events_df.copy()
+    events_df["event_date"] = pd.to_datetime(events_df["event_date"])
+    
+    if valuation_date is not None:
+        valuation_dt = pd.to_datetime(valuation_date)
+    else:
+        valuation_dt = iv_df["date"].max()
+        
+    spot_hist_until_valuation = spot_df[spot_df["date"] <= valuation_dt].copy()
+    
+    if spot_hist_until_valuation.empty:
+        raise ValueError(
+            f"No spot history available on or before valuation date {valuation_dt.date()}."
+        )
+    
+    enriched_spot = enrich_spot_history(spot_hist_until_valuation, market_config=market_config)
     latest_row = enriched_spot.iloc[-1]
-
+    
     spot = float(latest_row["close"])
-    valuation_date = pd.to_datetime(latest_row["date"])
+    valuation_ts = pd.to_datetime(latest_row["date"])
 
     rv_short_col = f"rv_{market_config.rv_window_short}d"
     rv_long_col = f"rv_{market_config.rv_window_long}d"
@@ -316,10 +347,17 @@ def build_market_snapshot(
     mom_60d = float(latest_row[mom_long_col]) if pd.notna(latest_row[mom_long_col]) else np.nan
     drawdown = float(latest_row["drawdown"]) if pd.notna(latest_row["drawdown"]) else np.nan
 
-    iv_metrics = extract_iv_metrics(iv_df=iv_df, spot=spot, target_tenor_days=30)
+    iv_slice = iv_df[iv_df["date"] == valuation_ts].copy()
+    
+    if iv_slice.empty:
+        raise ValueError(
+            f"No IV surface available for valuation date {valuation_ts.date()}."
+        )
+
+    iv_metrics = extract_iv_metrics(iv_df=iv_slice, spot=spot, target_tenor_days=30)
     catalyst_info = detect_nearest_catalyst(
         events_df=events_df,
-        valuation_date=valuation_date,
+        valuation_date=valuation_ts,
         market_config=market_config,
     )
 
@@ -327,7 +365,7 @@ def build_market_snapshot(
     vrp_20d = atm_iv - rv_20d if not np.isnan(rv_20d) else np.nan
 
     snapshot = {
-        "valuation_date": valuation_date,
+        "valuation_date": valuation_ts,
         "spot": spot,
         "rv_20d": rv_20d,
         "rv_60d": rv_60d,

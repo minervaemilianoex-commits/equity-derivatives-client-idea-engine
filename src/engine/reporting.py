@@ -41,15 +41,35 @@ def _fmt_pct_from_decimal(value: Optional[float], digits: int = 1) -> str:
     return f"{100 * value:.{digits}f}%"
 
 
-def _run_folder_name(client_objective: Optional[str]) -> str:
+def _run_folder_name(
+    client_objective: Optional[str],
+    client_profile_id: Optional[str] = None,
+    valuation_date: Optional[str] = None,
+) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     objective = _sanitize_filename(client_objective or "cross_client_ranking")
-    return f"{timestamp}_{objective}"
 
+    parts = [timestamp, objective]
 
-def ensure_run_output_dir(client_objective: Optional[str] = None) -> Path:
+    if client_profile_id:
+        parts.append(_sanitize_filename(client_profile_id))
+
+    if valuation_date:
+        parts.append(_sanitize_filename(valuation_date))
+
+    return "_".join(parts)
+
+def ensure_run_output_dir(
+    client_objective: Optional[str] = None,
+    client_profile_id: Optional[str] = None,
+    valuation_date: Optional[str] = None,
+) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    run_dir = OUTPUT_DIR / _run_folder_name(client_objective)
+    run_dir = OUTPUT_DIR / _run_folder_name(
+        client_objective=client_objective,
+        client_profile_id=client_profile_id,
+        valuation_date=valuation_date,
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
@@ -316,9 +336,21 @@ def export_run_bundle(
     snapshot: Dict[str, Any],
     ranked_ideas: List[RankedIdea],
     top_n: int = 3,
+    client_profile_id: Optional[str] = None,
 ) -> Path:
     client_objective = ranked_ideas[0].client_objective if ranked_ideas else None
-    run_dir = ensure_run_output_dir(client_objective=client_objective)
+    
+    snapshot_valuation_date = snapshot.get("valuation_date")
+    if snapshot_valuation_date is not None:
+        valuation_date_str = pd.to_datetime(snapshot_valuation_date).strftime("%Y-%m-%d")
+    else:
+        valuation_date_str = None
+        
+    run_dir = ensure_run_output_dir(
+        client_objective=client_objective,
+        client_profile_id=client_profile_id,
+        valuation_date=valuation_date_str,
+    )
 
     snapshot_df = snapshot_to_dataframe(snapshot)
     snapshot_df.to_csv(run_dir / "snapshot.csv", index=False)
